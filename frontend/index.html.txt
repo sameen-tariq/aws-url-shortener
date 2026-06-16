@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AWS URL Shortener</title>
+</head>
+<body>
+  <h1>AWS Serverless URL Shortener</h1>
+  <input type="text" id="url" placeholder="Enter URL">
+  <button onclick="shortenUrl()">Shorten URL</button>
+  <p id="result"></p>
+
+  <script>
+    async function shortenUrl() {
+      const url = document.getElementById("url").value;
+      const res = await fetch("https://k92bg3zqw0.execute-api.ap-southeast-1.amazonaws.com/shorten", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({url: url})
+      });
+      const data = await res.json();
+      document.getElementById("result").innerHTML =
+        "Short URL: <a href='" + data.short_url + "' target='_blank'>" + data.short_url + "</a>";
+    }
+  </script>
+</body>
+</html>

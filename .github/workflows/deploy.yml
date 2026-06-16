@@ -1,0 +1,200 @@
+name: Deploy — Serverless URL Shortener
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+  LAMBDA_SHORTEN: url-shortener-shorten
+  LAMBDA_REDIRECT: url-shortener-redirect
+
+jobs:
+  # ─────────────────────────────────────────────────
+  # JOB 1: Test Lambda functions
+  # ─────────────────────────────────────────────────
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r lambda/requirements.txt
+          pip install pytest boto3 moto
+
+      - name: Run pytest
+        run: pytest lambda/tests/ -v
+
+  # ─────────────────────────────────────────────────
+  # JOB 2: Build & push Docker image to ECR
+  # ─────────────────────────────────────────────────
+  build-and-push:
+    name: Build Docker image and push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./admin-dashboard
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────
+  # JOB 3: Deploy Lambda functions
+  # ─────────────────────────────────────────────────
+  deploy-lambda:
+    name: Deploy Lambda functions
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package lambda_shorten
+        run: |
+          cd lambda/shorten
+          zip -r ../../lambda_shorten.zip .
+
+      - name: Package lambda_redirect
+        run: |
+          cd lambda/redirect
+          zip -r ../../lambda_redirect.zip .
+
+      - name: Update Lambda — shorten
+        run: |
+          aws lambda update-function-code \
+            --function-name $LAMBDA_SHORTEN \
+            --zip-file fileb://lambda_shorten.zip \
+            --region $AWS_REGION
+
+      - name: Update Lambda — redirect
+        run: |
+          aws lambda update-function-code \
+            --function-name $LAMBDA_REDIRECT \
+            --zip-file fileb://lambda_redirect.zip \
+            --region $AWS_REGION
+
+      - name: Wait for Lambda updates to complete
+        run: |
+          aws lambda wait function-updated --function-name $LAMBDA_SHORTEN
+          aws lambda wait function-updated --function-name $LAMBDA_REDIRECT
+
+  # ─────────────────────────────────────────────────
+  # JOB 4: Deploy ECS service with new image
+  # ─────────────────────────────────────────────────
+  deploy-ecs:
+    name: Deploy ECS admin dashboard
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition url-shortener-admin \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: admin-dashboard
+          image: ${{ needs.build-and-push.outputs.image }}
+
+      - name: Deploy updated ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+  # ─────────────────────────────────────────────────
+  # JOB 5: Deploy frontend to S3
+  # ─────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy static site to S3
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync frontend files to S3
+        run: |
+          aws s3 sync ./frontend s3://$S3_BUCKET/ \
+            --delete \
+            --cache-control "max-age=86400"
+
+      - name: Set index.html cache to no-cache
+        run: |
+          aws s3 cp s3://$S3_BUCKET/index.html s3://$S3_BUCKET/index.html \
+            --metadata-directive REPLACE \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "text/html"
