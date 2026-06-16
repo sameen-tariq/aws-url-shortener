@@ -127,12 +127,11 @@ jobs:
   # ─────────────────────────────────────────────────
   # JOB 4: Deploy ECS service with new image
   # ─────────────────────────────────────────────────
-  deploy-ecs:
+deploy-ecs:
     name: Deploy ECS admin dashboard
     runs-on: ubuntu-latest
     needs: build-and-push
     if: github.ref == 'refs/heads/main'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -164,7 +163,7 @@ jobs:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
           service: ${{ env.ECS_SERVICE }}
           cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
+          wait-for-service-stability: false
 
   # ─────────────────────────────────────────────────
   # JOB 5: Deploy frontend to S3
